@@ -83,7 +83,6 @@ class chat_template {
         bool add_generation_prompt,
         const nlohmann::ordered_json & extra_context = nlohmann::ordered_json()) const
     {
-        try {
             chat_template_inputs inputs;
             inputs.messages = messages;
             inputs.tools = tools;
@@ -98,10 +97,6 @@ class chat_template {
             auto prompt = apply(inputs, opts);
             // fprintf(stderr, "try_raw_render: %s\n", prompt.c_str());
             return prompt;
-        } catch (const std::exception & e) {
-            // fprintf(stderr, "try_raw_render error: %s\n", e.what());
-            return "";
-        }
     }
 
   public:
@@ -223,7 +218,6 @@ class chat_template {
             caps_.supports_tool_call_id = contains(out, "call_911_");
         }
 
-        try {
             if (!caps_.supports_tools) {
                 const json user_msg {
                     {"role", "user"},
@@ -285,9 +279,6 @@ class chat_template {
                     tool_call_example_ = example;
                 }
             }
-        } catch (const std::exception & e) {
-            fprintf(stderr, "Failed to generate tool call example: %s\n", e.what());
-        }
     }
 
     const std::string & source() const { return source_; }
@@ -395,8 +386,8 @@ class chat_template {
 
             for (const auto & message_ : adjusted_messages) {
                 auto message = message_;
-                if (!message.contains("role") || (!message.contains("content") && !message.contains("tool_calls"))) {
-                    throw std::runtime_error("message must have 'role' and one of 'content' or 'tool_calls' fields: " + message.dump());
+                if (!message.contains("role") || !message.contains("content")) {
+                    MNN_ERROR("message must have 'role' and 'content' fields: %s", message.dump().c_str());
                 }
                 std::string role = message.at("role");
 
@@ -407,16 +398,13 @@ class chat_template {
                                 auto & function = tool_call.at("function");
                                 auto & arguments = function.at("arguments");
                                 if (arguments.is_string()) {
-                                    try {
-                                        arguments = json::parse(arguments.get<std::string>());
-                                    } catch (const std::exception & ecvt) {
-                                        fprintf(stderr, "Failed to parse arguments: %s\n", ecvt.what());
-                                    }
+                                    arguments = json::parse(arguments.get<std::string>());
                                 }
                             }
                         }
                     }
                     if (polyfill_tool_calls) {
+                        auto content = message.at("content");
                         auto tool_calls = json::array();
                         for (const auto & tool_call : message.at("tool_calls")) {
                             if (tool_call.at("type") != "function") {
@@ -435,11 +423,8 @@ class chat_template {
                         auto obj = json {
                             {"tool_calls", tool_calls},
                         };
-                        if (message.contains("content")) {
-                            auto content = message.at("content");
-                            if (!content.is_null() && !content.empty()) {
-                                obj["content"] = content;
-                            }
+                        if (!content.is_null() && !content.empty()) {
+                            obj["content"] = content;
                         }
                         message["content"] = obj.dump(2);
                         message.erase("tool_calls");
