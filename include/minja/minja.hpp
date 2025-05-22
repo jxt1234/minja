@@ -28,17 +28,125 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-
-#include <nlohmann/json.hpp>
-#include <MNN/MNNDefine.h>
+#include "rapidjson/document.h"
+#include "rapidjson/prettywriter.h"
+#include "rapidjson/stringbuffer.h"
+#include "rapidjson/error/en.h" // For GetParseError_En
 
 static void _printlog(const std::string& i) {
-    MNN_PRINT("%s\n", i.c_str());
+    printf("%s\n", i.c_str());
 }
 
-using json = nlohmann::ordered_json;
 
 namespace minja {
+enum ObjectType {
+    JSON_NULL = 0,
+    JSON_INT64 = 1,
+    JSON_DOUBLE = 2,
+    JSON_STRING = 3,
+    JSON_BOOL = 4,
+};
+class json {
+public:
+    ObjectType mType;
+    std::string mString;
+    int64_t mInt;
+    double mDouble;
+    bool mBool;
+    json() {
+        mType = JSON_NULL;
+    }
+    json(bool v) {
+        mBool = v;
+        mType = JSON_BOOL;
+    }
+    json(int64_t v) {
+        mInt = v;
+        mType = JSON_INT64;
+    }
+    json(double v) {
+        mDouble = v;
+        mType = JSON_DOUBLE;
+    }
+    json(std::string v) {
+        mString = v;
+        mType = JSON_STRING;
+    }
+    json(const char* c, size_t len) {
+        mString.assign(c, len);
+        mType = JSON_STRING;
+    }
+    json(const json& right) {
+        mType = right.mType;
+        mInt = right.mInt;
+        mBool = right.mBool;
+        mDouble = right.mDouble;
+        mString = right.mString;
+    }
+    bool operator==(const json& right) const {
+        if (mType != right.mType) {
+            return false;
+        }
+        switch (mType) {
+            case JSON_STRING:
+                return mString == right.mString;
+            case JSON_INT64:
+                return mInt == right.mInt;
+            case JSON_DOUBLE:
+                return mDouble == right.mDouble;
+            case JSON_BOOL:
+                return mBool == right.mBool;
+            default:
+                break;
+        }
+        return true;
+    }
+    bool is_string() const {
+        return mType == JSON_STRING;
+    }
+    bool is_null() const { return mType == JSON_NULL; }
+    bool is_boolean() const { return mType == JSON_BOOL; }
+    bool is_number_integer() const { return mType == JSON_INT64; }
+    bool is_number_float() const { return mType == JSON_DOUBLE; }
+    bool is_number() const { return mType == JSON_DOUBLE || mType == JSON_INT64; }
+    bool empty() const {
+        return mString.empty();
+    }
+    bool get(bool& ) const {
+        return mBool;
+    }
+    std::string get(std::string& ) const {
+        return mString;
+    }
+    int64_t get(int64_t& ) const {
+        return mInt;
+    }
+    int get(int& ) const {
+        return mInt;
+    }
+    float get(float&) const {
+        return mDouble;
+    }
+    double get(double& ) const {
+        return mDouble;
+    }
+
+    std::string dump() const {
+        switch (mType) {
+            case JSON_STRING:
+                return mString;
+            case JSON_INT64:
+                return std::to_string(mInt);
+            case JSON_DOUBLE:
+                return std::to_string(mDouble);
+            case JSON_BOOL:
+                return mBool ? "True" : "False";
+            default:
+                break;
+        }
+        return "null";
+    }
+};
 
 class Context;
 
@@ -79,9 +187,7 @@ private:
   Value(const std::shared_ptr<CallableType> & callable) : object_(std::make_shared<ObjectType>()), callable_(callable) {}
 
   /* Python-style string repr */
-  static void dump_string(const json & primitive, std::ostringstream & out, char string_quote = '\'') {
-    if (!primitive.is_string()) _printlog("Value is not a string: " + primitive.dump());
-    auto s = primitive.dump();
+  static void dump_string(const std::string& s, std::ostringstream & out, char string_quote = '\'') {
     if (string_quote == '"' || s.find('\'') != std::string::npos) {
       out << s;
       return;
@@ -141,7 +247,7 @@ private:
     } else if (is_boolean() && !to_json) {
       out << (this->to_bool() ? "True" : "False");
     } else if (is_string() && !to_json) {
-      dump_string(primitive_, out, string_quote);
+      dump_string(primitive_.mString, out, string_quote);
     } else {
       out << primitive_.dump();
     }
@@ -155,22 +261,33 @@ public:
   Value(const std::nullptr_t &) {}
   Value(const std::string & v) : primitive_(v) {}
   Value(const char * v) : primitive_(std::string(v)) {}
+    Value(json& json) : primitive_(json) {
+        // Do nothing
+    }
 
-  Value(const json & v) {
-    if (v.is_object()) {
+  Value(const rapidjson::Value & v) {
+    if (v.IsObject()) {
       auto object = std::make_shared<ObjectType>();
-      for (auto it = v.begin(); it != v.end(); ++it) {
-        (*object)[it.key()] = it.value();
+      for (auto& it : v.GetObject()) {
+        (*object)[it.name.GetString()] = it.value;
       }
       object_ = std::move(object);
-    } else if (v.is_array()) {
+    } else if (v.IsArray()) {
       auto array = std::make_shared<ArrayType>();
-      for (const auto& item : v) {
+      for (const auto& item : v.GetArray()) {
         array->push_back(Value(item));
       }
       array_ = array;
     } else {
-      primitive_ = v;
+        if (v.IsFloat() || v.IsDouble()) {
+            primitive_ = json(v.GetDouble());
+        } else if (v.IsInt() || v.IsInt64()) {
+            primitive_ = json(v.GetInt64());
+        } else if (v.IsBool()) {
+            primitive_ = json(v.GetBool());
+        } else if (v.IsString()) {
+            primitive_ = json(v.GetString(), v.GetStringLength());
+        }
     }
   }
 
@@ -186,7 +303,7 @@ public:
   size_t size() const {
     if (is_object()) return object_->size();
     if (is_array()) return array_->size();
-    if (is_string()) return primitive_.get<std::string>().length();
+    if (is_string()) return primitive_.mString.size();
     _printlog("Value is not an array or object: " + dump());
     return 0;
   }
@@ -237,7 +354,7 @@ public:
     } else if (is_object()) {
       if (!index.is_hashable())
         _printlog("Unhashable type: " + index.dump());
-      auto it = object_->find(index.primitive_);
+      auto it = object_->find(index.primitive_.dump());
       if (it == object_->end())
         _printlog("Key not found: " + index.dump());
       auto ret = it->second;
@@ -257,7 +374,7 @@ public:
       return array_->at(index < 0 ? array_->size() + index : index);
     } else if (object_) {
       if (!key.is_hashable()) _printlog("Unhashable type: " + dump());
-      auto it = object_->find(key.primitive_);
+      auto it = object_->find(key.primitive_.dump());
       if (it == object_->end()) return Value();
       return it->second;
     }
@@ -314,7 +431,7 @@ public:
         callback(key);
       }
     } else if (is_string()) {
-      for (char c : primitive_.get<std::string>()) {
+      for (char c : primitive_.mString) {
         auto val = Value(std::string(1, c));
         callback(val);
       }
@@ -411,7 +528,7 @@ public:
       return false;
     } else if (object_) {
       if (!value.is_hashable()) _printlog("Unhashable type: " + value.dump());
-      return object_->find(value.primitive_) != object_->end();
+      return object_->find(value.primitive_.dump()) != object_->end();
     } else {
       _printlog("contains can only be called on arrays and objects: " + dump());
     }
@@ -433,9 +550,9 @@ public:
         _printlog("Unhashable type: " + dump());
     }
     if (is_array()) return array_->at(index.get<int>());
-    if (is_object()) return object_->at(index.primitive_);
+    if (is_object()) return object_->at(index.primitive_.dump());
     _printlog("Value is not an array or object: " + dump());
-    return object_->at(index.primitive_);
+    return object_->at(index.primitive_.dump());
   }
   const Value& at(size_t index) const {
     return const_cast<Value*>(this)->at(index);
@@ -444,7 +561,9 @@ public:
     if (is_null()) {
       _printlog("Undefined value or reference");
     }
-    if (is_array()) return array_->at(index);
+      if (is_array()) {
+          return array_->at(index);
+      }
       if (is_object()) {
           return object_->at(std::to_string(index));
       }
@@ -460,9 +579,8 @@ public:
 
   template <typename T>
   T get() const {
-    if (is_primitive()) return primitive_.get<T>();
-    _printlog("get<T> not defined for this value type: " + dump());
-    return 0;
+      T d;
+      return primitive_.get(d);
   }
 
   std::string dump(int indent=-1, bool to_json=false) const {
@@ -1216,8 +1334,6 @@ public:
     SubscriptExpr(const Location & loc, std::shared_ptr<Expression> && b, std::shared_ptr<Expression> && i)
         : Expression(loc, Expression::Type_Subscript), base(std::move(b)), index(std::move(i)) {}
     Value do_evaluate(const std::shared_ptr<Context> & context) const override {
-        if (!base) _printlog("SubscriptExpr.base is null");
-        if (!index) _printlog("SubscriptExpr.index is null");
         auto target_value = base->evaluate(context);
         if (index->mType == Expression::Type_Slice){
             auto slice = (SliceExpr*)(index.get());
@@ -1725,11 +1841,17 @@ private:
           if (std::isdigit(*it)) {
             ++it;
           } else if (*it == '.') {
-            if (hasDecimal) _printlog("Multiple decimal points");
+              if (hasDecimal) {
+                  _printlog("Multiple decimal points");
+                  return json();
+              }
             hasDecimal = true;
             ++it;
           } else if (it != start && (*it == 'e' || *it == 'E')) {
-            if (hasExponent) _printlog("Multiple exponents");
+              if (hasExponent) {
+                  _printlog("Multiple exponents");
+                  return json();
+              }
             hasExponent = true;
             ++it;
           } else {
@@ -1740,9 +1862,13 @@ private:
           it = before;
           return json(); // No valid characters found
         }
-
         std::string str(start, it);
-        return json::parse(str);
+        if (hasExponent || hasDecimal) {
+            double v = std::stof(str);
+            return json(v);
+        }
+        int64_t v = std::stoi(str);
+        return json(v);
     }
 
     /** integer, float, bool, string */
@@ -2684,10 +2810,11 @@ inline std::shared_ptr<Context> Context::builtins() {
     if (args.contains("object")) {
       auto & obj = args.at("object");
       if (obj.is_string()) {
-        auto json_obj = json::parse(obj.get<std::string>());
-        for (const auto & kv : json_obj.items()) {
-          items.push_back(Value::array({kv.key(), kv.value()}));
-        }
+          rapidjson::Document doc;
+          doc.Parse(obj.get<std::string>().c_str());
+          for (auto& kv : doc.GetObject()) {
+              items.push_back(Value::array({kv.name, kv.value}));
+          }
       } else if (!obj.is_null()) {
         for (auto & key : obj.keys()) {
           items.push_back(Value::array({key, obj.at(key)}));
