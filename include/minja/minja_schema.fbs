@@ -1,0 +1,277 @@
+// minja_schema.fbs
+namespace minja;
+
+table Location {
+  source:string;
+  pos:uint;
+}
+
+enum JsonType : byte {
+  JSON_NULL,
+  JSON_INT64,
+  JSON_DOUBLE,
+  JSON_STRING,
+  JSON_BOOL
+}
+
+table JsonValue {
+  mType:JsonType;
+  mString:string;
+  mInt:long;
+  mDouble:double;
+  mBool:bool;
+}
+
+enum MinjaValueType : byte {
+  Primitive,
+  Array,
+  Object
+}
+
+table Value {
+  value_type:MinjaValueType;
+  primitive:JsonValue;
+  array_values:[Value];
+  object_keys:[string];
+  object_values:[Value];
+}
+
+enum ExpressionType : byte {
+  Type_Variable,
+  Type_If,
+  Type_Liter,
+  Type_Array,
+  Type_Dict,
+  Type_Slice,
+  Type_Subscript,
+  Type_Unary,
+  Type_Binary,
+  Type_MethodCall,
+  Type_Call,
+  Type_Filter
+}
+
+table VariableExprData {
+  name:string;
+}
+
+table LiteralExprData {
+  value:Value;
+}
+
+table ArrayExprData {
+  elements:[Expression];
+}
+
+table DictExprItemData {
+  key:Expression;
+  value:Expression;
+}
+
+table DictExprData {
+  elements:[DictExprItemData];
+}
+
+table SliceExprData {
+  start:Expression;
+  end:Expression;
+  step:Expression;
+}
+
+table SubscriptExprData {
+  base:Expression;
+  index:Expression;
+}
+
+enum UnaryOpType : byte {
+  Plus,
+  Minus,
+  LogicalNot,
+  Expansion,
+  ExpansionDict
+}
+
+table UnaryOpExprData {
+  expr:Expression;
+  op:UnaryOpType;
+}
+
+enum BinaryOpType : byte {
+  StrConcat,
+  Add,
+  Sub,
+  Mul,
+  MulMul,
+  Div,
+  DivDiv,
+  Mod,
+  Eq,
+  Ne,
+  Lt,
+  Gt,
+  Le,
+  Ge,
+  And,
+  Or,
+  In,
+  NotIn,
+  Is,
+  IsNot
+}
+
+table BinaryOpExprData {
+  left:Expression;
+  right:Expression;
+  op:BinaryOpType;
+}
+
+table ArgumentsExpressionData {
+  args:[Expression];
+  kwarg_names:[string];
+  kwarg_values:[Expression];
+}
+
+table MethodCallExprData {
+  object:Expression;
+  method_name:string;
+  args:ArgumentsExpressionData;
+}
+
+table CallExprData {
+  object:Expression;
+  args:ArgumentsExpressionData;
+}
+
+table FilterExprData {
+  parts:[Expression];
+}
+
+table IfExprData {
+  condition:Expression;
+  then_expr:Expression;
+  else_expr:Expression;
+}
+
+union ExpressionData {
+  VariableExprData,
+  IfExprData,
+  LiteralExprData,
+  ArrayExprData,
+  DictExprData,
+  SliceExprData,
+  SubscriptExprData,
+  UnaryOpExprData,
+  BinaryOpExprData,
+  MethodCallExprData,
+  CallExprData,
+  FilterExprData
+}
+
+table Expression {
+  location:Location;
+  expression_type:ExpressionType;
+  expression_data:ExpressionData;
+}
+
+// New definitions for TemplateNode and its subclasses
+
+enum LoopControlTypeFb : byte {
+  Normal,
+  Break,
+  Continue
+}
+
+enum TemplateNodeType : byte {
+  SequenceNodeType,
+  TextNodeType,
+  ExpressionNodeType,
+  IfNodeType,
+  LoopControlNodeType,
+  ForNodeType,
+  MacroNodeType,
+  FilterNodeType,
+  SetNodeType,
+  SetTemplateNodeType
+}
+
+table SequenceNodeData {
+  children:[TemplateNode];
+}
+
+table TextNodeData {
+  text:string;
+}
+
+table ExpressionNodeData {
+  expr:Expression;
+}
+
+table IfNodeCascadeItemData {
+  condition:Expression;
+  body:TemplateNode;
+}
+
+table IfNodeData {
+  cascade:[IfNodeCascadeItemData];
+}
+
+table LoopControlNodeData {
+  control_type:LoopControlTypeFb;
+}
+
+table ForNodeData {
+  var_names:[string];
+  iterable:Expression;
+  condition:Expression;
+  body:TemplateNode;
+  recursive:bool;
+  else_body:TemplateNode;
+}
+
+table ParameterData {
+  name:string;
+  default_value:Expression;
+}
+
+table MacroNodeData {
+  name:string;
+  params:[ParameterData];
+  body:TemplateNode;
+}
+
+table FilterNodeData {
+  filter:Expression;
+  body:TemplateNode;
+}
+
+table SetNodeData {
+  ns:string;
+  var_names:[string];
+  value:Expression;
+}
+
+table SetTemplateNodeData {
+  name:string;
+  template_value:TemplateNode;
+}
+
+union TemplateNodeData {
+  SequenceNodeData,
+  TextNodeData,
+  ExpressionNodeData,
+  IfNodeData,
+  LoopControlNodeData,
+  ForNodeData,
+  MacroNodeData,
+  FilterNodeData,
+  SetNodeData,
+  SetTemplateNodeData
+}
+
+table TemplateNode {
+  location:Location;
+  node_type:TemplateNodeType;
+  node_data:TemplateNodeData;
+}
+
+root_type TemplateNode;

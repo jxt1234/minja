@@ -12,6 +12,31 @@ cmake_policy(SET CMP0135 NEW) # https://cmake.org/cmake/help/latest/policy/CMP01
 project(minja VERSION 1.0.0 LANGUAGES CXX)
 
 add_library(minja INTERFACE)
+target_sources(minja INTERFACE
+  # Add sources for minja library if it were not INTERFACE only.
+  # For INTERFACE, sources are typically headers or consumed by targets linking to it.
+  # If minja becomes a static/shared library, add .cpp files here.
+  # For now, we add the serialization source to a separate static library
+  # that minja will link against if minja itself is not compiled.
+  # However, since minja is INTERFACE, it doesn't get "linked" in the traditional sense.
+  # The generated FlatBuffers header is handled by target_include_directories.
+  # The serialization .cpp file needs to be compiled into *something*.
+  # Let's create a helper static library for minja's compiled parts.
+)
+
+# Create a static library for minja's compiled components (like serialization)
+add_library(minja_compiled STATIC
+    src/minja_serialization.cpp
+)
+
+# Link minja_compiled to flatbuffers (runtime)
+target_link_libraries(minja_compiled PRIVATE flatbuffers::flatbuffers)
+
+# The main 'minja' INTERFACE library will bring in includes and link dependencies.
+# If applications link to 'minja', they should also get 'minja_compiled'.
+# We can make minja_compiled a PUBLIC dependency of minja.
+target_link_libraries(minja INTERFACE minja_compiled)
+
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -58,6 +83,46 @@ include(FetchContent)
 FetchContent_Declare(json URL https://github.com/nlohmann/json/archive/refs/heads/develop.zip)
 FetchContent_MakeAvailable(json)
 target_link_libraries(minja INTERFACE nlohmann_json::nlohmann_json)
+
+# Fetch FlatBuffers
+set(FLATBUFFERS_BUILD_TESTS OFF CACHE BOOL "Build FlatBuffers tests" FORCE)
+FetchContent_Declare(
+  flatbuffers
+  GIT_REPOSITORY https://github.com/google/flatbuffers.git
+  GIT_TAG        v24.3.25
+)
+FetchContent_MakeAvailable(flatbuffers)
+# flatc should be available as flatbuffers::flatc after FetchContent_MakeAvailable
+
+set(MINJA_SCHEMA_FILE ${CMAKE_CURRENT_SOURCE_DIR}/include/minja/minja_schema.fbs)
+set(FLATBUFFERS_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated_flatbuffers)
+set(MINJA_GENERATED_HEADER ${FLATBUFFERS_GENERATED_DIR}/minja_schema_generated.h)
+
+# Command to generate the C++ header from the schema
+add_custom_command(
+  OUTPUT ${MINJA_GENERATED_HEADER}
+  COMMAND $<TARGET_FILE:flatbuffers::flatc> -c -o ${FLATBUFFERS_GENERATED_DIR} --gen-object-api ${MINJA_SCHEMA_FILE}
+  DEPENDS ${MINJA_SCHEMA_FILE} flatbuffers::flatc # Depending on flatbuffers::flatc ensures flatc is built first
+  COMMENT "Generating C++ from FlatBuffers schema ${MINJA_SCHEMA_FILE}"
+  VERBATIM
+)
+
+# Custom target for the generated header
+add_custom_target(
+  MinjaFlatbuffersGenerated
+  DEPENDS ${MINJA_GENERATED_HEADER}
+)
+
+# Add the generated files directory to minja's include path
+target_include_directories(minja INTERFACE
+  $<BUILD_INTERFACE:${FLATBUFFERS_GENERATED_DIR}>
+)
+
+# Add dependency from minja_compiled to the custom target to ensure generation before compilation
+add_dependencies(minja_compiled MinjaFlatbuffersGenerated)
+
+# minja INTERFACE library already links to flatbuffers::flatbuffers
+# target_link_libraries(minja INTERFACE flatbuffers::flatbuffers) # This is already present below, good.
 
 if(MINJA_TEST_ENABLED)
     if (MINJA_FUZZTEST_ENABLED)
@@ -118,7 +183,11 @@ include(GNUInstallDirs)
 target_include_directories(minja INTERFACE
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+    $<BUILD_INTERFACE:${FLATBUFFERS_GENERATED_DIR}> # Also add to install interface if headers are installed
 )
+
+# Ensure the generated header is also installed
+install(FILES ${MINJA_GENERATED_HEADER} DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/minja/generated)
 
 install(FILES
   ${PROJECT_SOURCE_DIR}/include/minja/minja.hpp
@@ -126,7 +195,7 @@ install(FILES
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/minja
 )
 install(
-  TARGETS minja
+  TARGETS minja minja_compiled # Also install the compiled part if needed, or handle via linking
   EXPORT "${TARGETS_EXPORT_NAME}"
   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/minja  # for downstream projects
 )

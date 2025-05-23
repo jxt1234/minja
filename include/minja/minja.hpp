@@ -33,12 +33,60 @@
 #include "rapidjson/stringbuffer.h"
 #include "rapidjson/error/en.h" // For GetParseError_En
 
+// Forward declaration for FlatBufferBuilder and Offsets
+namespace flatbuffers {
+    class FlatBufferBuilder;
+    template <typename T> struct Offset;
+} // namespace flatbuffers
+
+// Include for generated FlatBuffers schema
+// Assuming the build system adds the generated directory to include paths
+#include "minja_schema_generated.h"
+
+
 static void _printlog(const std::string& i) {
     printf("%s\n", i.c_str());
 }
 
 
 namespace minja {
+// Forward declare fbs namespace if it's not global
+// (Assuming 'namespace minja;' in .fbs leads to minja::fbs::...)
+namespace fbs {
+    struct Location;
+    struct JsonValue;
+    struct Value;
+    struct Expression;
+    // ExpressionData union members
+    struct VariableExprData;
+    struct LiteralExprData;
+    struct ArrayExprData;
+    struct DictExprItemData;
+    struct DictExprData;
+    struct SliceExprData;
+    struct SubscriptExprData;
+    struct UnaryOpExprData;
+    struct BinaryOpExprData;
+    struct ArgumentsExpressionData;
+    struct MethodCallExprData;
+    struct CallExprData;
+    struct FilterExprData;
+    struct IfExprData;
+    // TemplateNodeData union members (will be used later)
+    struct SequenceNodeData;
+    struct TextNodeData;
+    struct ExpressionNodeData;
+    struct IfNodeData;
+    struct ForNodeData;
+    struct MacroNodeData;
+    struct FilterNodeData;
+    struct SetNodeData;
+    struct SetTemplateNodeData;
+    struct LoopControlNodeData;
+
+} // namespace fbs
+
+
 enum ObjectType {
     JSON_NULL = 0,
     JSON_INT64 = 1,
@@ -53,6 +101,10 @@ public:
     int64_t mInt;
     double mDouble;
     bool mBool;
+
+    // Serialization method
+    flatbuffers::Offset<minja::fbs::JsonValue> serialize(flatbuffers::FlatBufferBuilder& builder) const;
+
     json() {
         mType = JSON_NULL;
     }
@@ -589,6 +641,9 @@ public:
     return out.str();
   }
 
+  // Serialization method
+  flatbuffers::Offset<minja::fbs::Value> serialize(flatbuffers::FlatBufferBuilder& builder) const;
+
   Value operator-() const {
       if (is_number_integer())
         return -get<int64_t>();
@@ -760,12 +815,18 @@ class Context : public std::enable_shared_from_this<Context> {
 struct Location {
     std::shared_ptr<std::string> source;
     size_t pos;
+
+    // Serialization method
+    flatbuffers::Offset<minja::fbs::Location> serialize(flatbuffers::FlatBufferBuilder& builder) const;
 };
 
 class Expression {
 protected:
     virtual Value do_evaluate(const std::shared_ptr<Context> & context) const = 0;
 public:
+    // Serialization method (pure virtual)
+    virtual flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const = 0;
+
     enum Type {
         Type_Variable = 0,
         Type_If,
@@ -805,6 +866,7 @@ public:
         }
         return context->at(name);
     }
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
 };
 
 static void destructuring_assign(const std::vector<std::string> & var_names, const std::shared_ptr<Context> & context, Value& item) {
@@ -999,6 +1061,7 @@ public:
         out << text;
         return LoopControlType::Normal;
     }
+    flatbuffers::Offset<minja::fbs::TemplateNode> serialize(flatbuffers::FlatBufferBuilder& builder) const;
 };
 
 class ExpressionNode : public TemplateNode {
@@ -1017,6 +1080,7 @@ public:
       }
         return LoopControlType::Normal;
   }
+    flatbuffers::Offset<minja::fbs::TemplateNode> serialize(flatbuffers::FlatBufferBuilder& builder) const;
 };
 
 class IfNode : public TemplateNode {
@@ -1037,6 +1101,7 @@ public:
       }
         return LoopControlType::Normal;
     }
+    flatbuffers::Offset<minja::fbs::TemplateNode> serialize(flatbuffers::FlatBufferBuilder& builder) const;
 };
 
 class LoopControlNode : public TemplateNode {
@@ -1046,6 +1111,7 @@ class LoopControlNode : public TemplateNode {
     LoopControlType do_render(std::ostringstream &, const std::shared_ptr<Context> &) const override {
         return control_type_;
     }
+    flatbuffers::Offset<minja::fbs::TemplateNode> serialize(flatbuffers::FlatBufferBuilder& builder) const;
 };
 
 class ForNode : public TemplateNode {
@@ -1064,6 +1130,131 @@ public:
       // https://jinja.palletsprojects.com/en/3.0.x/templates/#for
       if (!iterable) _printlog("ForNode.iterable is null");
       if (!body) _printlog("ForNode.body is null");
+    flatbuffers::Offset<minja::fbs::TemplateNode> serialize(flatbuffers::FlatBufferBuilder& builder) const;
+};
+
+class MacroNode : public TemplateNode {
+    std::shared_ptr<VariableExpr> name;
+    Expression::Parameters params;
+    std::shared_ptr<TemplateNode> body;
+    std::unordered_map<std::string, size_t> named_param_positions;
+public:
+    MacroNode(const Location & loc, std::shared_ptr<VariableExpr> && n, Expression::Parameters && p, std::shared_ptr<TemplateNode> && b)
+        : TemplateNode(loc), name(std::move(n)), params(std::move(p)), body(std::move(b)) {
+        for (size_t i = 0; i < params.size(); ++i) {
+          const auto & name = params[i].first;
+          if (!name.empty()) {
+            named_param_positions[name] = i;
+          }
+        }
+    }
+    LoopControlType do_render(std::ostringstream &, const std::shared_ptr<Context> & macro_context) const override {
+        if (!name) _printlog("MacroNode.name is null");
+        if (!body) _printlog("MacroNode.body is null");
+        auto callable = Value::callable([&](const std::shared_ptr<Context> & context, ArgumentsValue & args) {
+            auto call_context = macro_context;
+            std::vector<bool> param_set(params.size(), false);
+            for (size_t i = 0, n = args.args.size(); i < n; i++) {
+                auto & arg = args.args[i];
+                if (i >= params.size()) _printlog("Too many positional arguments for macro " + name->get_name());
+                param_set[i] = true;
+                auto & param_name = params[i].first;
+                call_context->set(param_name, arg);
+            }
+            for (auto& iter : args.kwargs) {
+                auto& arg_name = iter.first;
+                auto& value = iter.second;
+                auto it = named_param_positions.find(arg_name);
+                if (it == named_param_positions.end()) _printlog("Unknown parameter name for macro " + name->get_name() + ": " + arg_name);
+
+                call_context->set(arg_name, value);
+                param_set[it->second] = true;
+            }
+            // Set default values for parameters that were not passed
+            for (size_t i = 0, n = params.size(); i < n; i++) {
+                if (!param_set[i] && params[i].second != nullptr) {
+                    auto val = params[i].second->evaluate(context);
+                    call_context->set(params[i].first, val);
+                }
+            }
+            return body->render(call_context);
+        });
+        macro_context->set(name->get_name(), callable);
+        return LoopControlType::Normal;
+    }
+    flatbuffers::Offset<minja::fbs::TemplateNode> serialize(flatbuffers::FlatBufferBuilder& builder) const;
+};
+
+class FilterNode : public TemplateNode {
+    std::shared_ptr<Expression> filter;
+    std::shared_ptr<TemplateNode> body;
+
+public:
+    FilterNode(const Location & loc, std::shared_ptr<Expression> && f, std::shared_ptr<TemplateNode> && b)
+        : TemplateNode(loc), filter(std::move(f)), body(std::move(b)) {}
+
+    LoopControlType do_render(std::ostringstream & out, const std::shared_ptr<Context> & context) const override {
+        if (!filter) _printlog("FilterNode.filter is null");
+        if (!body) _printlog("FilterNode.body is null");
+        auto filter_value = filter->evaluate(context);
+        if (!filter_value.is_callable()) {
+            _printlog("Filter must be a callable: " + filter_value.dump());
+        }
+        std::string rendered_body = body->render(context);
+
+        ArgumentsValue filter_args = {{Value(rendered_body)}, {}};
+        auto result = filter_value.call(context, filter_args);
+        out << result.to_str();
+        return LoopControlType::Normal;
+    }
+    flatbuffers::Offset<minja::fbs::TemplateNode> serialize(flatbuffers::FlatBufferBuilder& builder) const;
+};
+
+class SetNode : public TemplateNode {
+    std::string ns;
+    std::vector<std::string> var_names;
+    std::shared_ptr<Expression> value;
+public:
+    SetNode(const Location & loc, const std::string & ns, const std::vector<std::string> & vns, std::shared_ptr<Expression> && v)
+        : TemplateNode(loc), ns(ns), var_names(vns), value(std::move(v)) {}
+    LoopControlType do_render(std::ostringstream &, const std::shared_ptr<Context> & context) const override {
+      if (!value) _printlog("SetNode.value is null");
+      if (!ns.empty()) {
+        if (var_names.size() != 1) {
+          _printlog("Namespaced set only supports a single variable name");
+        }
+        auto & name = var_names[0];
+        auto ns_value = context->get(ns);
+        if (!ns_value.is_object()) _printlog("Namespace '" + ns + "' is not an object");
+        ns_value.set(name, this->value->evaluate(context));
+      } else {
+        auto val = value->evaluate(context);
+        destructuring_assign(var_names, context, val);
+      }
+        return LoopControlType::Normal;
+
+    }
+    flatbuffers::Offset<minja::fbs::TemplateNode> serialize(flatbuffers::FlatBufferBuilder& builder) const;
+};
+
+class SetTemplateNode : public TemplateNode {
+    std::string name;
+    std::shared_ptr<TemplateNode> template_value;
+public:
+    SetTemplateNode(const Location & loc, const std::string & name, std::shared_ptr<TemplateNode> && tv)
+        : TemplateNode(loc), name(name), template_value(std::move(tv)) {}
+    LoopControlType do_render(std::ostringstream &, const std::shared_ptr<Context> & context) const override {
+      if (!template_value) _printlog("SetTemplateNode.template_value is null");
+      Value value { template_value->render(context) };
+      context->set(name, value);
+        return LoopControlType::Normal;
+
+    }
+    flatbuffers::Offset<minja::fbs::TemplateNode> serialize(flatbuffers::FlatBufferBuilder& builder) const;
+};
+
+class IfExpr : public Expression {
+    std::shared_ptr<Expression> condition;
 
       auto iterable_value = iterable->evaluate(context);
       Value::CallableType loop_function;
@@ -1272,6 +1463,7 @@ public:
       }
       return nullptr;
     }
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
 };
 
 class LiteralExpr : public Expression {
@@ -1280,6 +1472,7 @@ public:
     LiteralExpr(const Location & loc, const Value& v)
       : Expression(loc, Expression::Type_Liter), value(v) {}
     Value do_evaluate(const std::shared_ptr<Context> &) const override { return value; }
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
 };
 
 class ArrayExpr : public Expression {
@@ -1295,6 +1488,7 @@ public:
         }
         return result;
     }
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
 };
 
 class DictExpr : public Expression {
@@ -1313,6 +1507,7 @@ public:
         }
         return result;
     }
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
 };
 
 class SliceExpr : public Expression {
@@ -1325,6 +1520,7 @@ public:
         _printlog("SliceExpr not implemented");
         return Value();
     }
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
 };
 
 class SubscriptExpr : public Expression {
@@ -1336,6 +1532,93 @@ public:
     Value do_evaluate(const std::shared_ptr<Context> & context) const override {
         auto target_value = base->evaluate(context);
         if (index->mType == Expression::Type_Slice){
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
+};
+
+class UnaryOpExpr : public Expression {
+public:
+    enum class Op { Plus, Minus, LogicalNot, Expansion, ExpansionDict };
+    std::shared_ptr<Expression> expr;
+    Op op;
+    UnaryOpExpr(const Location & loc, std::shared_ptr<Expression> && e, Op o)
+      : Expression(loc, Expression::Type_Unary), expr(std::move(e)), op(o) {}
+    Value do_evaluate(const std::shared_ptr<Context> & context) const override {
+        if (!expr) _printlog("UnaryOpExpr.expr is null");
+        auto e = expr->evaluate(context);
+        switch (op) {
+            case Op::Plus: return e;
+            case Op::Minus: return -e;
+            case Op::LogicalNot: return !e.to_bool();
+            case Op::Expansion:
+            case Op::ExpansionDict:
+                _printlog("Expansion operator is only supported in function calls and collections");
+
+        }
+        _printlog("Unknown unary operator");
+        return Value();
+    }
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
+};
+
+class BinaryOpExpr : public Expression {
+public:
+    enum class Op { StrConcat, Add, Sub, Mul, MulMul, Div, DivDiv, Mod, Eq, Ne, Lt, Gt, Le, Ge, And, Or, In, NotIn, Is, IsNot };
+private:
+    std::shared_ptr<Expression> left;
+    std::shared_ptr<Expression> right;
+    Op op;
+public:
+    BinaryOpExpr(const Location & loc, std::shared_ptr<Expression> && l, std::shared_ptr<Expression> && r, Op o)
+        : Expression(loc, Expression::Type_Binary), left(std::move(l)), right(std::move(r)), op(o) {}
+    Value do_evaluate(const std::shared_ptr<Context> & context) const override {
+        if (!left) _printlog("BinaryOpExpr.left is null");
+        if (!right) _printlog("BinaryOpExpr.right is null");
+        auto l = left->evaluate(context);
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
+};
+
+struct ArgumentsExpression {
+    std::vector<std::shared_ptr<Expression>> args;
+    std::vector<std::pair<std::string, std::shared_ptr<Expression>>> kwargs;
+
+    ArgumentsValue evaluate(const std::shared_ptr<Context> & context) const {
+        ArgumentsValue vargs;
+        for (const auto& arg : this->args) {
+            if (arg->mType == Expression::Type_Unary) {
+                auto un_expr = (UnaryOpExpr*)(arg.get());
+                if (un_expr->op == UnaryOpExpr::Op::Expansion) {
+                    auto array = un_expr->expr->evaluate(context);
+                    if (!array.is_array()) {
+                        _printlog("Expansion operator only supported on arrays");
+                    }
+                    array.for_each([&](Value & value) {
+                        vargs.args.push_back(value);
+                    });
+                    continue;
+                } else if (un_expr->op == UnaryOpExpr::Op::ExpansionDict) {
+                    auto dict = un_expr->expr->evaluate(context);
+                    if (!dict.is_object()) {
+                        _printlog("ExpansionDict operator only supported on objects");
+                    }
+                    dict.for_each([&](const Value & key) {
+                        vargs.kwargs.push_back({key.get<std::string>(), dict.at(key)});
+                    });
+                    continue;
+                }
+            }
+            vargs.args.push_back(arg->evaluate(context));
+        }
+        for (const auto& iter : this->kwargs) {
+            const auto& name = iter.first;
+            const auto& value = iter.second;
+            vargs.kwargs.push_back({name, value->evaluate(context)});
+        }
+        return vargs;
+    }
+    flatbuffers::Offset<minja::fbs::ArgumentsExpressionData> serialize(flatbuffers::FlatBufferBuilder& builder) const;
+};
+
+static std::string strip(const std::string & s, const std::string & chars = "", bool left = true, bool right = true) {
             auto slice = (SliceExpr*)(index.get());
             bool reverse = slice->step && slice->step->evaluate(context).get<int64_t>() == -1;
             if (slice->step && !reverse) {
@@ -1617,6 +1900,70 @@ public:
             return Value();
         }
         if (obj.is_array()) {
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
+};
+
+class CallExpr : public Expression {
+public:
+    std::shared_ptr<Expression> object;
+    ArgumentsExpression args;
+    CallExpr(const Location & loc, std::shared_ptr<Expression> && obj, ArgumentsExpression && a)
+        : Expression(loc, Expression::Type_Call), object(std::move(obj)), args(std::move(a)) {}
+    Value do_evaluate(const std::shared_ptr<Context> & context) const override {
+        if (!object) {
+            _printlog("CallExpr.object is null");
+            return Value();
+        }
+        auto obj = object->evaluate(context);
+        if (!obj.is_callable()) {
+            //_printlog("Object is not callable: " + obj.dump(2));
+            return Value();
+        }
+        auto vargs = args.evaluate(context);
+        return obj.call(context, vargs);
+    }
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
+};
+
+class FilterExpr : public Expression {
+    std::vector<std::shared_ptr<Expression>> parts;
+public:
+    FilterExpr(const Location & loc, std::vector<std::shared_ptr<Expression>> && p)
+      : Expression(loc, Expression::Type_Filter), parts(std::move(p)) {}
+    Value do_evaluate(const std::shared_ptr<Context> & context) const override {
+        Value result;
+        bool first = true;
+        for (const auto& part : parts) {
+          if (!part) _printlog("FilterExpr.part is null");
+          if (first) {
+            first = false;
+            result = part->evaluate(context);
+          } else {
+              if (part->mType == Expression::Type_Call) {
+                  auto ce = (CallExpr*)(part.get());
+              auto target = ce->object->evaluate(context);
+              ArgumentsValue args = ce->args.evaluate(context);
+              args.args.insert(args.args.begin(), result);
+              result = target.call(context, args);
+            } else {
+              auto callable = part->evaluate(context);
+              ArgumentsValue args;
+              args.args.insert(args.args.begin(), result);
+              result = callable.call(context, args);
+            }
+          }
+        }
+        return result;
+    }
+
+    void prepend(std::shared_ptr<Expression> && e) {
+        parts.insert(parts.begin(), std::move(e));
+    }
+    flatbuffers::Offset<minja::fbs::Expression> serialize(flatbuffers::FlatBufferBuilder& builder) const override;
+};
+
+class Parser {
+private:
           if (method->get_name() == "append") {
               vargs.expectArgs("append method", {1, 1}, {0, 0});
               obj.push_back(vargs.args[0]);
